@@ -1,6 +1,5 @@
 'use strict';
 
-
 const _queueAsyncBuckets = new Map();
 const _gcLimit = 10000;
 
@@ -8,9 +7,9 @@ async function _asyncQueueExecutor(queue, cleanup) {
     let offt = 0;
 
     async function execute() {
-        let limit = Math.min(queue.length, _gcLimit);
-        for (let i = offt; i < limit; i++) {
-            const job = queue[i];
+        const limit = Math.min(queue.length, _gcLimit);
+        for (; offt < limit; offt++) {
+            const job = queue[offt];
             try {
                 job.resolve(await job.awaitable());
             } catch (e) {
@@ -18,15 +17,14 @@ async function _asyncQueueExecutor(queue, cleanup) {
             }
         }
         if (limit < queue.length) {
+            // Limpiar memoria si sobrepasa límite
             if (limit >= _gcLimit) {
                 queue.splice(0, limit);
                 offt = 0;
-            } else {
-                offt = limit;
             }
-            execute();
+            execute(); // continuar con el siguiente batch
         } else {
-            return cleanup();
+            cleanup(); // terminar y eliminar bucket
         }
     }
 
@@ -35,12 +33,13 @@ async function _asyncQueueExecutor(queue, cleanup) {
 
 module.exports = function (bucket, awaitable) {
     if (!awaitable.name) {
+        // Si la función no tiene nombre, se le asigna el bucket (opcional)
         Object.defineProperty(awaitable, 'name', { writable: true });
         if (typeof bucket === 'string') {
             awaitable.name = bucket;
         }
     }
-    let inactive;
+    let inactive = false;
     if (!_queueAsyncBuckets.has(bucket)) {
         _queueAsyncBuckets.set(bucket, []);
         inactive = true;
