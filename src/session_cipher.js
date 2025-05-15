@@ -10,6 +10,11 @@ const queueJob = require('./queue_job');
 
 const VERSION = 3;
 
+/**
+ * Valida que el valor sea un Buffer, lanza error si no.
+ * @param {*} value 
+ * @returns {Buffer}
+ */
 function assertBuffer(value) {
     if (!Buffer.isBuffer(value)) {
         throw new TypeError(`Expected Buffer instead of: ${value?.constructor?.name || typeof value}`);
@@ -18,7 +23,11 @@ function assertBuffer(value) {
 }
 
 class SessionCipher {
-
+    /**
+     * Constructor del cifrador de sesión.
+     * @param {Object} storage - Objeto para cargar y guardar sesiones e identidad.
+     * @param {ProtocolAddress} protocolAddress - Dirección del protocolo usada para identificar la sesión.
+     */
     constructor(storage, protocolAddress) {
         if (!(protocolAddress instanceof ProtocolAddress)) {
             throw new TypeError("protocolAddress must be a ProtocolAddress");
@@ -27,6 +36,12 @@ class SessionCipher {
         this.storage = storage;
     }
 
+    /**
+     * Codifica dos números (4 bits cada uno) en un byte.
+     * @param {number} number1 - Primer número (4 bits max)
+     * @param {number} number2 - Segundo número (4 bits max)
+     * @returns {number}
+     */
     _encodeTupleByte(number1, number2) {
         if (number1 > 15 || number2 > 15) {
             throw new TypeError("Numbers must be 4 bits or less");
@@ -34,6 +49,11 @@ class SessionCipher {
         return (number1 << 4) | number2;
     }
 
+    /**
+     * Decodifica un byte en dos números de 4 bits.
+     * @param {number} byte 
+     * @returns {[number, number]}
+     */
     _decodeTupleByte(byte) {
         return [byte >> 4, byte & 0xf];
     }
@@ -42,6 +62,7 @@ class SessionCipher {
         return `<SessionCipher(${this.addr.toString()})>`;
     }
 
+    /** Carga el registro de sesión desde el almacenamiento */
     async getRecord() {
         const record = await this.storage.loadSession(this.addr.toString());
         if (record && !(record instanceof SessionRecord)) {
@@ -50,15 +71,22 @@ class SessionCipher {
         return record;
     }
 
+    /** Guarda el registro de sesión en el almacenamiento */
     async storeRecord(record) {
         record.removeOldSessions();
         await this.storage.storeSession(this.addr.toString(), record);
     }
 
+    /** Cola una tarea para evitar condiciones de carrera */
     async queueJob(awaitable) {
         return await queueJob(this.addr.toString(), awaitable);
     }
 
+    /**
+     * Encripta un mensaje usando la sesión abierta.
+     * @param {Buffer} data 
+     * @returns {Promise<Object>} Mensaje cifrado y metadata.
+     */
     async encrypt(data) {
         assertBuffer(data);
         const ourIdentityKey = await this.storage.getOurIdentity();
@@ -96,6 +124,7 @@ class SessionCipher {
             });
 
             const msgBuf = protobufs.WhisperMessage.encode(msg).finish();
+
             const macInput = Buffer.concat([
                 ourIdentityKey.pubKey,
                 remoteIdentityKey,
@@ -134,6 +163,12 @@ class SessionCipher {
         });
     }
 
+    /**
+     * Intenta desencriptar con varias sesiones.
+     * @param {Buffer} data 
+     * @param {Session[]} sessions 
+     * @returns {Promise<{session: Session, plaintext: Buffer}>}
+     */
     async decryptWithSessions(data, sessions) {
         if (!sessions.length) throw new errors.SessionError("No sessions available");
         const errs = [];
@@ -149,6 +184,11 @@ class SessionCipher {
         throw new errors.SessionError("No matching sessions found for message");
     }
 
+    /**
+     * Desencripta un mensaje Whisper estándar.
+     * @param {Buffer} data 
+     * @returns {Promise<Buffer>}
+     */
     async decryptWhisperMessage(data) {
         assertBuffer(data);
         return await this.queueJob(async () => {
@@ -162,6 +202,7 @@ class SessionCipher {
                 throw new errors.UntrustedIdentityKeyError(this.addr.id, remoteIdentityKey);
             }
 
+            // Se podría manejar cierre de sesión aquí, si necesario.
             if (record.isClosed(result.session)) {}
 
             await this.storeRecord(record);
@@ -169,6 +210,11 @@ class SessionCipher {
         });
     }
 
+    /**
+     * Desencripta un mensaje PreKey Whisper.
+     * @param {Buffer} data 
+     * @returns {Promise<Buffer>}
+     */
     async decryptPreKeyWhisperMessage(data) {
         assertBuffer(data);
         const versions = this._decodeTupleByte(data[0]);
@@ -195,6 +241,12 @@ class SessionCipher {
         });
     }
 
+    /**
+     * Desencripta un mensaje Whisper con una sesión específica.
+     * @param {Buffer} messageBuffer 
+     * @param {Session} session 
+     * @returns {Promise<Buffer>}
+     */
     async doDecryptWhisperMessage(messageBuffer, session) {
         assertBuffer(messageBuffer);
         if (!session) throw new TypeError("session required");
@@ -237,6 +289,11 @@ class SessionCipher {
         return plaintext;
     }
 
+    /**
+     * Llena las claves de mensajes desde la posición actual hasta 'counter'.
+     * @param {Chain} chain 
+     * @param {number} counter 
+     */
     fillMessageKeys(chain, counter) {
         if (chain.chainKey.counter >= counter) return;
         if (counter - chain.chainKey.counter > 2000) {
@@ -252,6 +309,12 @@ class SessionCipher {
         return this.fillMessageKeys(chain, counter);
     }
 
+    /**
+     * Posiblemente avanza el ratchet de sesión ante una nueva clave remota.
+     * @param {Session} session 
+     * @param {Buffer} remoteKey 
+     * @param {number} previousCounter 
+     */
     maybeStepRatchet(session, remoteKey, previousCounter) {
         if (session.getChain(remoteKey)) return;
 
@@ -276,6 +339,12 @@ class SessionCipher {
         ratchet.lastRemoteEphemeralKey = remoteKey;
     }
 
+    /**
+     * Calcula y añade una nueva cadena ratchet para la sesión.
+     * @param {Session} session 
+     * @param {Buffer} remoteKey 
+     * @param {boolean} sending 
+     */
     calculateRatchet(session, remoteKey, sending) {
         const ratchet = session.currentRatchet;
         const sharedSecret = curve.calculateAgreement(remoteKey, ratchet.ephemeralKeyPair.privKey);
@@ -295,6 +364,7 @@ class SessionCipher {
         ratchet.rootKey = masterKey[0];
     }
 
+    /** Devuelve si existe una sesión abierta */
     async hasOpenSession() {
         return await this.queueJob(async () => {
             const record = await this.getRecord();
@@ -302,6 +372,7 @@ class SessionCipher {
         });
     }
 
+    /** Cierra la sesión abierta si existe */
     async closeOpenSession() {
         return await this.queueJob(async () => {
             const record = await this.getRecord();
