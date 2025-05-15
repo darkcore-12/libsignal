@@ -15,8 +15,7 @@ class SessionEntry {
     }
 
     toString() {
-        const baseKey = this.indexInfo && this.indexInfo.baseKey &&
-            this.indexInfo.baseKey.toString('base64');
+        const baseKey = this.indexInfo?.baseKey?.toString('base64');
         return `<SessionEntry [baseKey=${baseKey}]>`;
     }
 
@@ -134,7 +133,7 @@ class SessionEntry {
                     key: c.chainKey.key ? c.chainKey.key.toString('base64') : null
                 },
                 chainType: c.chainType,
-                messageKeys: messageKeys
+                messageKeys
             };
         }
 
@@ -158,7 +157,7 @@ class SessionEntry {
                     key: c.chainKey.key ? Buffer.from(c.chainKey.key, 'base64') : null
                 },
                 chainType: c.chainType,
-                messageKeys: messageKeys
+                messageKeys
             };
         }
 
@@ -166,10 +165,9 @@ class SessionEntry {
     }
 }
 
-// Migraciones para versiones antiguas de datos
 const migrations = [{
     version: 'v1',
-    migrate: function migrateV1(data) {
+    migrate(data) {
         const sessions = data._sessions || {};
         if (data.registrationId) {
             for (const key in sessions) {
@@ -178,13 +176,10 @@ const migrations = [{
                 }
             }
         }
-        // Puedes agregar aquí otras migraciones si es necesario
     }
 }];
 
-
 class SessionRecord {
-
     constructor() {
         this.sessions = {};
         this.version = SESSION_RECORD_VERSION;
@@ -220,7 +215,6 @@ class SessionRecord {
         if (data._sessions) {
             for (const [key, entry] of Object.entries(data._sessions)) {
                 if (entry.indexInfo.closed !== -1) {
-                    // Ignorar sesiones cerradas
                     continue;
                 }
                 obj.sessions[key] = SessionEntry.deserialize(entry);
@@ -232,11 +226,9 @@ class SessionRecord {
 
     serialize() {
         const _sessions = {};
-
         for (const [key, entry] of Object.entries(this.sessions)) {
             _sessions[key] = entry.serialize();
         }
-
         return {
             _sessions,
             version: this.version
@@ -244,28 +236,20 @@ class SessionRecord {
     }
 
     haveOpenSession() {
-        const openSession = this.getOpenSession();
-        return (!!openSession && typeof openSession.registrationId === 'number');
+        return !!this.getOpenSession()?.registrationId;
     }
 
     getSession(key) {
         assertBuffer(key);
-
         const session = this.sessions[key.toString('base64')];
         if (session && session.indexInfo.baseKeyType === BaseKeyType.OURS) {
             throw new Error("Tried to lookup a session using our baseKey");
         }
-
         return session;
     }
 
     getOpenSession() {
-        for (const session of Object.values(this.sessions)) {
-            if (!this.isClosed(session)) {
-                return session;
-            }
-        }
-        return undefined;
+        return Object.values(this.sessions).find(session => !this.isClosed(session));
     }
 
     setSession(session) {
@@ -273,22 +257,19 @@ class SessionRecord {
     }
 
     getSessions() {
-        // Ordena sesiones por último uso (de más reciente a más antiguo)
-        return Object.values(this.sessions).sort((a, b) => {
-            const aUsed = a.indexInfo.used || 0;
-            const bUsed = b.indexInfo.used || 0;
-            return bUsed - aUsed;
-        });
+        return Object.values(this.sessions).sort((a, b) => (b.indexInfo.used || 0) - (a.indexInfo.used || 0));
     }
 
     closeSession(session) {
-        if (this.isClosed(session)) return;
-        session.indexInfo.closed = Date.now();
+        if (!this.isClosed(session)) {
+            session.indexInfo.closed = Date.now();
+        }
     }
 
     openSession(session) {
-        if (!this.isClosed(session)) return;
-        session.indexInfo.closed = -1;
+        if (this.isClosed(session)) {
+            session.indexInfo.closed = -1;
+        }
     }
 
     isClosed(session) {
@@ -296,9 +277,7 @@ class SessionRecord {
     }
 
     removeOldSessions() {
-        // Eliminar sesiones cerradas más antiguas cuando hay más de CLOSED_SESSIONS_MAX
         let sessionKeys = Object.keys(this.sessions);
-
         while (sessionKeys.length > CLOSED_SESSIONS_MAX) {
             let oldestKey = null;
             let oldestClosedTimestamp = Infinity;
@@ -315,16 +294,13 @@ class SessionRecord {
                 delete this.sessions[oldestKey];
                 sessionKeys = Object.keys(this.sessions);
             } else {
-                // No hay sesiones cerradas para eliminar
                 break;
             }
         }
     }
 
     deleteAllSessions() {
-        for (const key of Object.keys(this.sessions)) {
-            delete this.sessions[key];
-        }
+        this.sessions = {};
     }
 }
 
