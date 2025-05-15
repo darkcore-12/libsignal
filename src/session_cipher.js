@@ -55,7 +55,7 @@ class SessionCipher {
      * @returns {[number, number]}
      */
     _decodeTupleByte(byte) {
-        return [byte >> 4, byte & 0x0f];
+        return [byte >> 4, byte & 0xf];
     }
 
     toString() {
@@ -66,7 +66,7 @@ class SessionCipher {
     async getRecord() {
         const record = await this.storage.loadSession(this.addr.toString());
         if (record && !(record instanceof SessionRecord)) {
-            throw new TypeError('SessionRecord type expected from loadSession');
+            throw new TypeError('SessionRecord type expected from loadSession'); 
         }
         return record;
     }
@@ -90,7 +90,6 @@ class SessionCipher {
     async encrypt(data) {
         assertBuffer(data);
         const ourIdentityKey = await this.storage.getOurIdentity();
-
         return await this.queueJob(async () => {
             const record = await this.getRecord();
             if (!record) throw new errors.SessionError("No sessions");
@@ -110,7 +109,6 @@ class SessionCipher {
 
             this.fillMessageKeys(chain, chain.chainKey.counter + 1);
 
-            // Deriva secretos
             const keys = crypto.deriveSecrets(
                 chain.messageKeys[chain.chainKey.counter],
                 Buffer.alloc(32),
@@ -118,7 +116,6 @@ class SessionCipher {
             );
             delete chain.messageKeys[chain.chainKey.counter];
 
-            // Construye mensaje Whisper
             const msg = protobufs.WhisperMessage.create({
                 ephemeralKey: session.currentRatchet.ephemeralKeyPair.pubKey,
                 counter: chain.chainKey.counter,
@@ -128,7 +125,6 @@ class SessionCipher {
 
             const msgBuf = protobufs.WhisperMessage.encode(msg).finish();
 
-            // MAC input
             const macInput = Buffer.concat([
                 ourIdentityKey.pubKey,
                 remoteIdentityKey,
@@ -136,10 +132,7 @@ class SessionCipher {
                 msgBuf
             ]);
 
-            // Calcula MAC
             const mac = crypto.calculateMAC(keys[1], macInput);
-
-            // Construye resultado final
             const result = Buffer.concat([
                 Buffer.from([this._encodeTupleByte(VERSION, VERSION)]),
                 msgBuf,
@@ -148,7 +141,6 @@ class SessionCipher {
 
             await this.storeRecord(record);
 
-            // Mensaje preKey (opcional)
             if (session.pendingPreKey) {
                 const preKeyMsg = protobufs.PreKeyWhisperMessage.create({
                     identityKey: ourIdentityKey.pubKey,
@@ -210,9 +202,8 @@ class SessionCipher {
                 throw new errors.UntrustedIdentityKeyError(this.addr.id, remoteIdentityKey);
             }
 
-            if (record.isClosed(result.session)) {
-                // Aquí se puede manejar cierre de sesión si necesario.
-            }
+            // Se podría manejar cierre de sesión aquí, si necesario.
+            if (record.isClosed(result.session)) {}
 
             await this.storeRecord(record);
             return result.plaintext;
@@ -285,7 +276,6 @@ class SessionCipher {
 
         const keys = crypto.deriveSecrets(messageKey, Buffer.alloc(32), Buffer.from("WhisperMessageKeys"));
         const ourIdentityKey = await this.storage.getOurIdentity();
-
         const macInput = Buffer.concat([
             session.indexInfo.remoteIdentityKey,
             ourIdentityKey.pubKey,
@@ -295,38 +285,105 @@ class SessionCipher {
 
         crypto.verifyMAC(macInput, keys[1], messageBuffer.slice(-8), 8);
         const plaintext = crypto.decrypt(keys[0], message.ciphertext, keys[2].slice(0, 16));
-
+        delete session.pendingPreKey;
         return plaintext;
     }
 
     /**
-     * Actualiza la ratchet de la sesión si es necesario.
-     * @param {Session} session 
-     * @param {Buffer} ephemeralKey 
-     * @param {number} previousCounter 
+     * Llena las claves de mensajes desde la posición actual hasta 'counter'.
+     * @param {Chain} chain 
+     * @param {number} counter 
      */
-    maybeStepRatchet(session, ephemeralKey, previousCounter) {
-        if (session.currentRatchet.ephemeralKeyPair.pubKey.equals(ephemeralKey)) {
-            return;
+    fillMessageKeys(chain, counter) {
+        if (chain.chainKey.counter >= counter) return;
+        if (counter - chain.chainKey.counter > 2000) {
+            throw new errors.SessionError('Over 2000 messages into the future!');
         }
-        session.currentRatchet.previousCounter = previousCounter;
-        session.setRatchet(ephemeralKey);
+        if (!chain.chainKey.key) throw new errors.SessionError('Chain closed');
+
+        const key = chain.chainKey.key;
+        chain.messageKeys[chain.chainKey.counter + 1] = crypto.calculateMAC(key, Buffer.from([1]));
+        chain.chainKey.key = crypto.calculateMAC(key, Buffer.from([2]));
+        chain.chainKey.counter += 1;
+
+        return this.fillMessageKeys(chain, counter);
     }
 
     /**
-     * Completa las claves de mensaje hasta el contador indicado.
-     * @param {Chain} chain 
-     * @param {number} untilCounter 
+     * Posiblemente avanza el ratchet de sesión ante una nueva clave remota.
+     * @param {Session} session 
+     * @param {Buffer} remoteKey 
+     * @param {number} previousCounter 
      */
-    fillMessageKeys(chain, untilCounter) {
-        const max = 2000;
-        if (untilCounter - chain.chainKey.counter > max) {
-            throw new errors.InvalidMessageError("Over 2000 message keys attempted to be skipped");
+    maybeStepRatchet(session, remoteKey, previousCounter) {
+        if (session.getChain(remoteKey)) return;
+
+        const ratchet = session.currentRatchet;
+        const previousRatchet = session.getChain(ratchet.lastRemoteEphemeralKey);
+
+        if (previousRatchet) {
+            this.fillMessageKeys(previousRatchet, previousCounter);
+            delete previousRatchet.chainKey.key;
         }
-        while (chain.chainKey.counter < untilCounter) {
-            chain.messageKeys[chain.chainKey.counter] = chain.chainKey.getKey();
-            chain.chainKey = chain.chainKey.next();
+
+        this.calculateRatchet(session, remoteKey, false);
+
+        const prevCounter = session.getChain(ratchet.ephemeralKeyPair.pubKey);
+        if (prevCounter) {
+            ratchet.previousCounter = prevCounter.chainKey.counter;
+            session.deleteChain(ratchet.ephemeralKeyPair.pubKey);
         }
+
+        ratchet.ephemeralKeyPair = curve.generateKeyPair();
+        this.calculateRatchet(session, remoteKey, true);
+        ratchet.lastRemoteEphemeralKey = remoteKey;
+    }
+
+    /**
+     * Calcula y añade una nueva cadena ratchet para la sesión.
+     * @param {Session} session 
+     * @param {Buffer} remoteKey 
+     * @param {boolean} sending 
+     */
+    calculateRatchet(session, remoteKey, sending) {
+        const ratchet = session.currentRatchet;
+        const sharedSecret = curve.calculateAgreement(remoteKey, ratchet.ephemeralKeyPair.privKey);
+        const masterKey = crypto.deriveSecrets(sharedSecret, ratchet.rootKey, Buffer.from("WhisperRatchet"), 2);
+
+        const chainKey = sending ? ratchet.ephemeralKeyPair.pubKey : remoteKey;
+
+        session.addChain(chainKey, {
+            messageKeys: {},
+            chainKey: {
+                counter: -1,
+                key: masterKey[1]
+            },
+            chainType: sending ? ChainType.SENDING : ChainType.RECEIVING
+        });
+
+        ratchet.rootKey = masterKey[0];
+    }
+
+    /** Devuelve si existe una sesión abierta */
+    async hasOpenSession() {
+        return await this.queueJob(async () => {
+            const record = await this.getRecord();
+            return record?.haveOpenSession() || false;
+        });
+    }
+
+    /** Cierra la sesión abierta si existe */
+    async closeOpenSession() {
+        return await this.queueJob(async () => {
+            const record = await this.getRecord();
+            if (record) {
+                const openSession = record.getOpenSession();
+                if (openSession) {
+                    record.closeSession(openSession);
+                    await this.storeRecord(record);
+                }
+            }
+        });
     }
 }
 

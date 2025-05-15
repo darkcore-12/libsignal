@@ -9,13 +9,16 @@ function assertBuffer(value) {
     }
 }
 
+
 class SessionEntry {
+
     constructor() {
         this._chains = {};
     }
 
     toString() {
-        const baseKey = this.indexInfo?.baseKey?.toString('base64');
+        const baseKey = this.indexInfo && this.indexInfo.baseKey &&
+            this.indexInfo.baseKey.toString('base64');
         return `<SessionEntry [baseKey=${baseKey}]>`;
     }
 
@@ -72,20 +75,17 @@ class SessionEntry {
                 created: this.indexInfo.created,
                 remoteIdentityKey: this.indexInfo.remoteIdentityKey.toString('base64')
             },
-            _chains: this._serializeChains(this._chains)
+            _chains: this._serialize_chains(this._chains)
         };
-
         if (this.pendingPreKey) {
             data.pendingPreKey = Object.assign({}, this.pendingPreKey);
             data.pendingPreKey.baseKey = this.pendingPreKey.baseKey.toString('base64');
         }
-
         return data;
     }
 
     static deserialize(data) {
         const obj = new this();
-
         obj.registrationId = data.registrationId;
         obj.currentRatchet = {
             ephemeralKeyPair: {
@@ -96,7 +96,6 @@ class SessionEntry {
             previousCounter: data.currentRatchet.previousCounter,
             rootKey: Buffer.from(data.currentRatchet.rootKey, 'base64')
         };
-
         obj.indexInfo = {
             baseKey: Buffer.from(data.indexInfo.baseKey, 'base64'),
             baseKeyType: data.indexInfo.baseKeyType,
@@ -105,85 +104,78 @@ class SessionEntry {
             created: data.indexInfo.created,
             remoteIdentityKey: Buffer.from(data.indexInfo.remoteIdentityKey, 'base64')
         };
-
-        obj._chains = this._deserializeChains(data._chains);
-
+        obj._chains = this._deserialize_chains(data._chains);
         if (data.pendingPreKey) {
             obj.pendingPreKey = Object.assign({}, data.pendingPreKey);
             obj.pendingPreKey.baseKey = Buffer.from(data.pendingPreKey.baseKey, 'base64');
         }
-
         return obj;
     }
 
-    _serializeChains(chains) {
-        const serialized = {};
-
+    _serialize_chains(chains) {
+        const r = {};
         for (const key of Object.keys(chains)) {
             const c = chains[key];
             const messageKeys = {};
-
-            for (const [idx, mk] of Object.entries(c.messageKeys)) {
-                messageKeys[idx] = mk.toString('base64');
+            for (const [idx, key] of Object.entries(c.messageKeys)) {
+                messageKeys[idx] = key.toString('base64');
             }
-
-            serialized[key] = {
+            r[key] = {
                 chainKey: {
                     counter: c.chainKey.counter,
-                    key: c.chainKey.key ? c.chainKey.key.toString('base64') : null
+                    key: c.chainKey.key && c.chainKey.key.toString('base64')
                 },
                 chainType: c.chainType,
-                messageKeys
+                messageKeys: messageKeys
             };
         }
-
-        return serialized;
+        return r;
     }
 
-    static _deserializeChains(chainsData) {
-        const deserialized = {};
-
-        for (const key of Object.keys(chainsData)) {
-            const c = chainsData[key];
+    static _deserialize_chains(chains_data) {
+        const r = {};
+        for (const key of Object.keys(chains_data)) {
+            const c = chains_data[key];
             const messageKeys = {};
-
-            for (const [idx, mk] of Object.entries(c.messageKeys)) {
-                messageKeys[idx] = Buffer.from(mk, 'base64');
+            for (const [idx, key] of Object.entries(c.messageKeys)) {
+                messageKeys[idx] = Buffer.from(key, 'base64');
             }
-
-            deserialized[key] = {
+            r[key] = {
                 chainKey: {
                     counter: c.chainKey.counter,
-                    key: c.chainKey.key ? Buffer.from(c.chainKey.key, 'base64') : null
+                    key: c.chainKey.key && Buffer.from(c.chainKey.key, 'base64')
                 },
                 chainType: c.chainType,
-                messageKeys
+                messageKeys: messageKeys
             };
         }
-
-        return deserialized;
+        return r;
     }
+
 }
+
 
 const migrations = [{
     version: 'v1',
-    migrate(data) {
-        const sessions = data._sessions || {};
+    migrate: function migrateV1(data) {
+        const sessions = data._sessions;
         if (data.registrationId) {
             for (const key in sessions) {
                 if (!sessions[key].registrationId) {
                     sessions[key].registrationId = data.registrationId;
                 }
             }
+        } else {
+            for (const key in sessions) {
+                if (sessions[key].indexInfo.closed === -1) {
+                }
+            }
         }
     }
 }];
 
+
 class SessionRecord {
-    constructor() {
-        this.sessions = {};
-        this.version = SESSION_RECORD_VERSION;
-    }
 
     static createEntry() {
         return new SessionEntry();
@@ -191,17 +183,15 @@ class SessionRecord {
 
     static migrate(data) {
         let run = (data.version === undefined);
-
-        for (const migration of migrations) {
+        for (let i = 0; i < migrations.length; ++i) {
             if (run) {
-                migration.migrate(data);
-            } else if (migration.version === data.version) {
+                migrations[i].migrate(data);
+            } else if (migrations[i].version === data.version) {
                 run = true;
             }
         }
-
         if (!run) {
-            throw new Error("Error migrating SessionRecord: version unknown");
+            throw new Error("Error migrating SessionRecord");
         }
     }
 
@@ -209,19 +199,21 @@ class SessionRecord {
         if (data.version !== SESSION_RECORD_VERSION) {
             this.migrate(data);
         }
-
         const obj = new this();
-
         if (data._sessions) {
             for (const [key, entry] of Object.entries(data._sessions)) {
                 if (entry.indexInfo.closed !== -1) {
-                    continue;
+                    continue
                 }
                 obj.sessions[key] = SessionEntry.deserialize(entry);
             }
         }
-
         return obj;
+    }
+
+    constructor() {
+        this.sessions = {};
+        this.version = SESSION_RECORD_VERSION;
     }
 
     serialize() {
@@ -236,20 +228,25 @@ class SessionRecord {
     }
 
     haveOpenSession() {
-        return !!this.getOpenSession()?.registrationId;
+        const openSession = this.getOpenSession();
+        return (!!openSession && typeof openSession.registrationId === 'number');
     }
 
     getSession(key) {
         assertBuffer(key);
         const session = this.sessions[key.toString('base64')];
         if (session && session.indexInfo.baseKeyType === BaseKeyType.OURS) {
-            throw new Error("Tried to lookup a session using our baseKey");
+            throw new Error("Tried to lookup a session using our basekey");
         }
         return session;
     }
 
     getOpenSession() {
-        return Object.values(this.sessions).find(session => !this.isClosed(session));
+        for (const session of Object.values(this.sessions)) {
+            if (!this.isClosed(session)) {
+                return session;
+            }
+        }
     }
 
     setSession(session) {
@@ -257,19 +254,23 @@ class SessionRecord {
     }
 
     getSessions() {
-        return Object.values(this.sessions).sort((a, b) => (b.indexInfo.used || 0) - (a.indexInfo.used || 0));
+        return Array.from(Object.values(this.sessions)).sort((a, b) => {
+            const aUsed = a.indexInfo.used || 0;
+            const bUsed = b.indexInfo.used || 0;
+            return aUsed === bUsed ? 0 : aUsed < bUsed ? 1 : -1;
+        });
     }
 
     closeSession(session) {
-        if (!this.isClosed(session)) {
-            session.indexInfo.closed = Date.now();
+        if (this.isClosed(session)) {
+            return;
         }
+        session.indexInfo.closed = Date.now();
     }
 
     openSession(session) {
-        if (this.isClosed(session)) {
-            session.indexInfo.closed = -1;
-        }
+        if (!this.isClosed(session)) {}
+        session.indexInfo.closed = -1;
     }
 
     isClosed(session) {
@@ -277,30 +278,36 @@ class SessionRecord {
     }
 
     removeOldSessions() {
-        let sessionKeys = Object.keys(this.sessions);
-        while (sessionKeys.length > CLOSED_SESSIONS_MAX) {
-            let oldestKey = null;
-            let oldestClosedTimestamp = Infinity;
+        const sessionKeys = Object.keys(this.sessions);
+        const sessionsLength = sessionKeys.length;
 
+        for (let i = 0; i < sessionsLength && sessionsLength > CLOSED_SESSIONS_MAX; i++) {
+            let oldestKey;
+            let oldestSession;
             for (const key of sessionKeys) {
+                if (!key) continue
                 const session = this.sessions[key];
-                if (this.isClosed(session) && session.indexInfo.closed < oldestClosedTimestamp) {
-                    oldestClosedTimestamp = session.indexInfo.closed;
+                if (session.indexInfo.closed !== -1 &&
+                    (!oldestSession || session.indexInfo.closed < oldestSession.indexInfo.closed)) {
                     oldestKey = key;
+                    oldestSession = session;
+                    break;
                 }
             }
 
             if (oldestKey) {
                 delete this.sessions[oldestKey];
-                sessionKeys = Object.keys(this.sessions);
+                sessionKeys.splice(sessionKeys.indexOf(oldestKey), 1);
             } else {
-                break;
+                continue
             }
         }
     }
 
     deleteAllSessions() {
-        this.sessions = {};
+        for (const key of Object.keys(this.sessions)) {
+            delete this.sessions[key];
+        }
     }
 }
 
